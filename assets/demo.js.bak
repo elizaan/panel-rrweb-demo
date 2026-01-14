@@ -1,70 +1,34 @@
 (() => {
   console.log("demo.js: Script loaded!");
 
-  // Use MutationObserver to watch for elements being added to DOM
-  function waitForElements() {
-    console.log("Waiting for elements to be added to DOM...");
+  // More aggressive waiting strategy
+  function waitForBokehAndElements() {
+    let attempts = 0;
+    const maxAttempts = 200; // 20 seconds max
     
-    const checkAndInit = () => {
-      const rrwebStatus = document.querySelector("#rrweb-status");
-      const rrwebStart = document.querySelector("#rrweb-start");
-      const rrwebStop = document.querySelector("#rrweb-stop");
-      const demoViewer = document.querySelector("#demo-viewer");
-      const zoomIndicator = document.querySelector("#zoom-indicator");
+    const checkInterval = setInterval(() => {
+      attempts++;
       
-      if (rrwebStatus && rrwebStart && rrwebStop && demoViewer) {
-        console.log("✓ All required elements found!");
-        console.log("  - rrweb-status:", rrwebStatus);
-        console.log("  - rrweb-start:", rrwebStart);
-        console.log("  - rrweb-stop:", rrwebStop);
-        console.log("  - demo-viewer:", demoViewer);
-        console.log("  - zoom-indicator:", zoomIndicator || "not found (optional)");
-        return true;
+      // Check if Bokeh is done rendering
+      const bokehReady = window.Bokeh && 
+                        window.Bokeh.documents && 
+                        window.Bokeh.documents.length > 0;
+      
+      // Check if our elements exist
+      const rrwebStatus = document.getElementById("rrweb-status");
+      const demoViewer = document.getElementById("demo-viewer");
+      
+      if (attempts % 10 === 0) {
+        console.log(\`Attempt \${attempts}: Bokeh=\${bokehReady}, rrweb-status=\${!!rrwebStatus}, demo-viewer=\${!!demoViewer}\`);
       }
-      return false;
-    };
-    
-    // Try immediately
-    if (checkAndInit()) {
-      initializeAll();
-      return;
-    }
-    
-    // Set up MutationObserver to watch for DOM changes
-    let attemptCount = 0;
-    const maxAttempts = 300;
-    
-    const observer = new MutationObserver((mutations) => {
-      if (checkAndInit()) {
-        observer.disconnect();
+      
+      if (bokehReady && rrwebStatus && demoViewer) {
+        console.log("✓ All elements found! Initializing...");
+        clearInterval(checkInterval);
         initializeAll();
-      }
-    });
-    
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: false
-    });
-    
-    // Also do periodic checks as fallback
-    const fallbackInterval = setInterval(() => {
-      attemptCount++;
-      
-      if (attemptCount % 10 === 0) {
-        console.log(`Attempt ${attemptCount}: Still waiting...`);
-        console.log("  Current IDs in page:", Array.from(document.querySelectorAll("[id]")).map(e => e.id).slice(0, 20));
-      }
-      
-      if (checkAndInit()) {
-        clearInterval(fallbackInterval);
-        observer.disconnect();
-        initializeAll();
-      } else if (attemptCount >= maxAttempts) {
-        console.error("✗ Timeout after", maxAttempts, "attempts");
-        console.error("All IDs found:", Array.from(document.querySelectorAll("[id]")).map(e => e.id));
-        clearInterval(fallbackInterval);
-        observer.disconnect();
+      } else if (attempts >= maxAttempts) {
+        console.error("✗ Timeout: Elements not found after", attempts * 100, "ms");
+        clearInterval(checkInterval);
       }
     }, 100);
   }
@@ -78,9 +42,9 @@
   function initRrweb() {
     console.log("initRrweb: Starting...");
     
-    const statusEl = document.querySelector("#rrweb-status");
-    const startBtn = document.querySelector("#rrweb-start");
-    const stopBtn = document.querySelector("#rrweb-stop");
+    const statusEl = document.getElementById("rrweb-status");
+    const startBtn = document.getElementById("rrweb-start");
+    const stopBtn = document.getElementById("rrweb-stop");
     
     if (!statusEl || !startBtn || !stopBtn) {
       console.error("initRrweb: Elements not found!");
@@ -116,7 +80,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `rrweb-recording-${nowIso()}.json`;
+      a.download = \`rrweb-recording-\${nowIso()}.json\`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -132,7 +96,7 @@
         emit: (event) => {
           events.push(event);
           if (events.length % 50 === 0) {
-            console.log(`rrweb: ${events.length} events captured`);
+            console.log(\`rrweb: \${events.length} events captured\`);
           }
         },
       });
@@ -142,8 +106,8 @@
       if (!stopFn) return;
       stopFn();
       stopFn = null;
-      setStatus(`stopped (${events.length} events)`);
-      console.log(`rrweb: Recording stopped. Total events: ${events.length}`);
+      setStatus(\`stopped (\${events.length} events)\`);
+      console.log(\`rrweb: Recording stopped. Total events: \${events.length}\`);
       downloadEvents();
     };
 
@@ -159,7 +123,7 @@
   function initPanzoom() {
     console.log("initPanzoom: Starting...");
 
-    const viewer = document.querySelector("#demo-viewer");
+    const viewer = document.getElementById("demo-viewer");
     if (!viewer) {
       console.error("initPanzoom: viewer element not found!");
       return;
@@ -210,11 +174,11 @@
       svg.style.cursor = "grab";
     });
 
-    const zoomIndicator = document.querySelector("#zoom-indicator");
+    const zoomIndicator = document.getElementById("zoom-indicator");
     if (zoomIndicator) {
       panzoom.on("zoom", (e) => {
         const scale = e.detail.scale || 1;
-        zoomIndicator.textContent = `${Math.round(scale * 100)}%`;
+        zoomIndicator.textContent = \`\${Math.round(scale * 100)}%\`;
       });
     }
 
@@ -223,9 +187,8 @@
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", waitForElements);
+    document.addEventListener("DOMContentLoaded", waitForBokehAndElements);
   } else {
-    // DOM already loaded, start waiting immediately
-    waitForElements();
+    waitForBokehAndElements();
   }
 })();
