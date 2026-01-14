@@ -15,8 +15,6 @@ pn.extension(
         "rrweb": "https://unpkg.com/rrweb@latest/dist/rrweb.min.js",
         # Panzoom: https://github.com/timmywil/panzoom
         "panzoom": "https://unpkg.com/@panzoom/panzoom@4.6.1/dist/panzoom.min.js",
-        # Runs after load; initializes rrweb + pan/zoom (served by panel under /assets)
-        "demo": "/assets/demo.js",
     },
     raw_css=[
         """
@@ -69,6 +67,7 @@ rrweb_controls = pn.pane.HTML(
     </div>
     """,
     margin=(0, 0, 10, 0),
+    sizing_mode="stretch_width",
 )
 
 
@@ -79,18 +78,19 @@ image_viewer = pn.pane.HTML(
     f"""
     <div class="demo-card">
       <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-                  font-weight:600; margin-bottom:8px;">
-        Image viewer (pan + zoom)
+                  font-weight:600; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <span>Image viewer (pan + zoom)</span>
+        <span id="zoom-indicator" style="font-size:12px; color:#64748b; font-weight:400;">100%</span>
       </div>
       <div id="demo-viewer"
            style="width:100%; height:520px; overflow:hidden; border-radius:10px;
                   border: 1px solid rgba(15, 23, 42, 0.12); background: rgba(15, 23, 42, 0.02);
-                  touch-action:none;">
+                  touch-action:none; user-select:none;">
         {svg_text}
       </div>
       <div style="margin-top:8px; opacity:0.75; font-size:13px;
                   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-        Wheel = zoom, drag = pan, double-click = reset
+        🖱️ Wheel = zoom, drag = pan, double-click = reset
       </div>
     </div>
     """,
@@ -131,10 +131,45 @@ controls = pn.Column(
 )
 
 
+# Read the demo.js file and inject it with a delay to ensure DOM is ready
+demo_js = (ASSETS_DIR / "demo.js").read_text(encoding="utf-8")
+
+# Create a script that waits for Bokeh to fully render before executing
+init_script = pn.pane.HTML(
+    f"""
+    <script>
+    // Wait for Bokeh document to be ready
+    (function() {{
+      const script = {repr(demo_js)};
+      
+      function injectScript() {{
+        console.log("Injecting demo script after Bokeh ready...");
+        const scriptEl = document.createElement('script');
+        scriptEl.textContent = script;
+        document.head.appendChild(scriptEl);
+      }}
+      
+      // Wait for Bokeh.documents to be ready
+      if (window.Bokeh && window.Bokeh.documents && window.Bokeh.documents.length > 0) {{
+        setTimeout(injectScript, 500);
+      }} else {{
+        document.addEventListener('DOMContentLoaded', function() {{
+          setTimeout(injectScript, 1000);
+        }});
+      }}
+    }})();
+    </script>
+    """,
+    sizing_mode="fixed",
+    width=0,
+    height=0,
+)
+
 app = pn.Column(
     title,
     rrweb_controls,
     pn.Row(image_viewer, controls, sizing_mode="stretch_width"),
+    init_script,
     sizing_mode="stretch_width",
 )
 

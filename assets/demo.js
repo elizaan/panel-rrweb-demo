@@ -4,6 +4,41 @@
     else fn();
   }
 
+  function waitForElement(selector, callback, opts) {
+    opts = opts || {};
+    const maxWait = opts.maxWait || 30000; // 30 seconds
+    const checkInterval = opts.checkInterval || 200; // Check every 200ms
+    const startTime = Date.now();
+
+    console.log(`Waiting for element: ${selector}`);
+
+    const check = () => {
+      const element = document.querySelector(selector);
+      if (element) {
+        console.log(`Element found: ${selector}`);
+        callback(element);
+        return true;
+      }
+      
+      if (Date.now() - startTime > maxWait) {
+        console.warn(`Timeout waiting for element: ${selector}`);
+        return true;
+      }
+      
+      return false;
+    };
+
+    // Check immediately
+    if (check()) return;
+
+    // Then poll regularly
+    const intervalId = setInterval(() => {
+      if (check()) {
+        clearInterval(intervalId);
+      }
+    }, checkInterval);
+  }
+
   function pollUntil(fn, opts) {
     opts = opts || {};
     const everyMs = opts.everyMs || 100;
@@ -13,7 +48,10 @@
       tries++;
       try {
         if (fn()) clearInterval(t);
-        else if (tries >= maxTries) clearInterval(t);
+        else if (tries >= maxTries) {
+          console.warn("pollUntil: Max tries reached");
+          clearInterval(t);
+        }
       } catch (e) {
         clearInterval(t);
         // eslint-disable-next-line no-console
@@ -28,16 +66,21 @@
     const statusEl = document.getElementById("rrweb-status");
     const startBtn = document.getElementById("rrweb-start");
     const stopBtn = document.getElementById("rrweb-stop");
-    if (!statusEl || !startBtn || !stopBtn) return false; // DOM not ready yet
+    if (!statusEl || !startBtn || !stopBtn) {
+      return false; // DOM not ready yet
+    }
 
     const setStatus = (txt) => {
       statusEl.textContent = txt;
     };
 
     if (!window.rrweb || typeof window.rrweb.record !== "function") {
+      console.log("rrweb: library not loaded yet, waiting...");
       setStatus("rrweb loading…");
       return false; // wait for rrweb script
     }
+
+    console.log("rrweb: Initializing...");
 
     let stopFn = null;
     let events = [];
@@ -66,8 +109,14 @@
       if (stopFn) return;
       events = [];
       setStatus("recording…");
+      console.log("rrweb: Recording started");
       stopFn = window.rrweb.record({
-        emit: (event) => events.push(event),
+        emit: (event) => {
+          events.push(event);
+          if (events.length % 50 === 0) {
+            console.log(`rrweb: ${events.length} events captured`);
+          }
+        },
       });
     };
 
@@ -76,6 +125,7 @@
       stopFn();
       stopFn = null;
       setStatus(`stopped (${events.length} events)`);
+      console.log(`rrweb: Recording stopped. Total events: ${events.length}`);
       downloadEvents();
     };
 
@@ -87,6 +137,7 @@
     stopBtn.addEventListener("click", stopRecording);
 
     window.__rrweb_demo_inited = true;
+    console.log("rrweb: Initialization complete. Auto-starting in 300ms...");
     setTimeout(startRecording, 300); // auto-start
     return true;
   }
@@ -95,12 +146,22 @@
     if (window.__panzoom_demo_inited) return true;
 
     const viewer = document.getElementById("demo-viewer");
-    if (!viewer) return false;
+    if (!viewer) {
+      return false;
+    }
 
     const svg = viewer.querySelector("svg");
-    if (!svg) return false;
+    if (!svg) {
+      console.log("panzoom: SVG element not found in viewer, waiting...");
+      return false;
+    }
 
-    if (typeof window.Panzoom !== "function") return false; // wait for panzoom script
+    if (typeof window.Panzoom !== "function") {
+      console.log("panzoom: library not loaded yet, waiting...");
+      return false; // wait for panzoom script
+    }
+
+    console.log("panzoom: Initializing...");
 
     svg.style.width = "100%";
     svg.style.height = "100%";
@@ -111,10 +172,21 @@
       maxScale: 12,
       minScale: 0.5,
       contain: "outside",
+      startScale: 1,
+      startX: 0,
+      startY: 0,
     });
 
-    viewer.addEventListener("wheel", panzoom.zoomWithWheel);
-    viewer.addEventListener("dblclick", () => panzoom.reset());
+    // Wheel zoom with preventDefault to stop page scroll
+    viewer.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      panzoom.zoomWithWheel(e);
+    }, { passive: false });
+    
+    viewer.addEventListener("dblclick", () => {
+      console.log("panzoom: Reset view");
+      panzoom.reset();
+    });
     svg.addEventListener("mousedown", () => {
       svg.style.cursor = "grabbing";
     });
@@ -122,15 +194,59 @@
       svg.style.cursor = "grab";
     });
 
+    // Update zoom indicator
+    const zoomIndicator = document.getElementById("zoom-indicator");
+    if (zoomIndicator) {
+      panzoom.on("zoom", (e) => {
+        const scale = e.detail.scale || 1;
+        zoomIndicator.textContent = `${Math.round(scale * 100)}%`;
+      });
+      panzoom.on("pan", () => {
+        console.log("panzoom: Panning...");
+      });
+    }
+
     window.__demo_panzoom = panzoom;
     window.__panzoom_demo_inited = true;
+    console.log("panzoom: Initialization complete");
     return true;
   }
 
   ready(() => {
-    // These elements are inserted by Bokeh/Panel; polling makes this robust.
-    pollUntil(initRrweb, { everyMs: 150, maxTries: 300 });
-    pollUntil(initPanzoom, { everyMs: 150, maxTries: 300 });
+    console.log("demo.js: DOM ready, waiting for Panel elements...");
+    
+    // Debug: List all elements with IDs and log the full page structure
+    setTimeout(() => {
+      const allIds = Array.from(document.querySelectorAll('[id]')).map(el => {
+        return {id: el.id, tag: el.tagName, parent: el.parentElement?.tagName};
+      });
+      console.log("demo.js: All elements with IDs:", allIds);
+      console.log("demo.js: #rrweb-status exists?", !!document.getElementById("rrweb-status"));
+      console.log("demo.js: #demo-viewer exists?", !!document.getElementById("demo-viewer"));
+      
+      // Try alternative selectors
+      const rrwebByQuery = document.querySelector('[id="rrweb-status"]');
+      const viewerByQuery = document.querySelector('[id="demo-viewer"]');
+      console.log("demo.js: querySelector [id=rrweb-status]:", rrwebByQuery);
+      console.log("demo.js: querySelector [id=demo-viewer]:", viewerByQuery);
+    }, 500);
+    
+    // Give Panel/Bokeh time to render
+    setTimeout(() => {
+      console.log("demo.js: Starting element search after 2 second delay...");
+      
+      // Wait for rrweb controls to appear, then initialize
+      waitForElement("#rrweb-status", () => {
+        console.log("demo.js: rrweb controls found, initializing rrweb...");
+        pollUntil(initRrweb, { everyMs: 100, maxTries: 100 });
+      }, { checkInterval: 200 });
+
+      // Wait for viewer element to appear, then initialize panzoom
+      waitForElement("#demo-viewer", () => {
+        console.log("demo.js: demo-viewer found, initializing panzoom...");
+        pollUntil(initPanzoom, { everyMs: 100, maxTries: 100 });
+      }, { checkInterval: 200 });
+    }, 2000);
   });
 })();
 
