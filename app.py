@@ -15,6 +15,8 @@ pn.extension(
         "rrweb": "https://unpkg.com/rrweb@latest/dist/rrweb.min.js",
         # Panzoom: https://github.com/timmywil/panzoom
         "panzoom": "https://unpkg.com/@panzoom/panzoom@4.6.1/dist/panzoom.min.js",
+        # Runs after load; initializes rrweb + pan/zoom (served by panel under /assets)
+        "demo": "/assets/demo.js",
     },
     raw_css=[
         """
@@ -65,88 +67,14 @@ rrweb_controls = pn.pane.HTML(
         (auto-starts after load)
       </span>
     </div>
-
-    <script>
-    (function () {
-      function $(id) { return document.getElementById(id); }
-      function nowIso() { return new Date().toISOString().replace(/[:.]/g, "-"); }
-
-      function init() {
-        var statusEl = $("rrweb-status");
-        var startBtn = $("rrweb-start");
-        var stopBtn = $("rrweb-stop");
-        if (!statusEl || !startBtn || !stopBtn) return;
-
-        var stopFn = null;
-        var events = [];
-
-        function setStatus(txt) { statusEl.textContent = txt; }
-
-        function downloadEvents() {
-          var payload = {
-            created_at: new Date().toISOString(),
-            user_agent: navigator.userAgent,
-            url: location.href,
-            rrweb_events: events
-          };
-          var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement("a");
-          a.href = url;
-          a.download = "rrweb-recording-" + nowIso() + ".json";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(function () { URL.revokeObjectURL(url); }, 250);
-        }
-
-        function startRecording() {
-          if (!window.rrweb || !window.rrweb.record) {
-            setStatus("rrweb not loaded");
-            return;
-          }
-          if (stopFn) return;
-          events = [];
-          setStatus("recording…");
-          stopFn = window.rrweb.record({
-            emit: function (event) { events.push(event); }
-          });
-        }
-
-        function stopRecording() {
-          if (!stopFn) return;
-          stopFn();
-          stopFn = null;
-          setStatus("stopped (" + events.length + " events)");
-          downloadEvents();
-        }
-
-        // Expose for debugging in console
-        window.__rrweb_demo = {
-          start: startRecording,
-          stop: stopRecording,
-          getEvents: function () { return events; }
-        };
-
-        startBtn.addEventListener("click", startRecording);
-        stopBtn.addEventListener("click", stopRecording);
-
-        setTimeout(startRecording, 600);
-      }
-
-      if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", init);
-      } else {
-        init();
-      }
-    })();
-    </script>
     """,
     margin=(0, 0, 10, 0),
 )
 
 
 svg_text = DEMO_SVG_PATH.read_text(encoding="utf-8")
+if svg_text.lstrip().startswith("<?xml"):
+    svg_text = "\n".join(svg_text.splitlines()[1:])
 image_viewer = pn.pane.HTML(
     f"""
     <div class="demo-card">
@@ -165,42 +93,6 @@ image_viewer = pn.pane.HTML(
         Wheel = zoom, drag = pan, double-click = reset
       </div>
     </div>
-
-    <script>
-    (function () {{
-      function init() {{
-        var viewer = document.getElementById("demo-viewer");
-        if (!viewer) return;
-        var svg = viewer.querySelector("svg");
-        if (!svg || !window.Panzoom) return;
-
-        // Make sure the inline SVG is "transformable"
-        svg.style.width = "100%";
-        svg.style.height = "100%";
-        svg.style.cursor = "grab";
-        svg.style.transformOrigin = "0 0";
-
-        var panzoom = window.Panzoom(svg, {{
-          maxScale: 12,
-          minScale: 0.5,
-          contain: "outside"
-        }});
-
-        viewer.addEventListener("wheel", panzoom.zoomWithWheel);
-        viewer.addEventListener("dblclick", function () {{ panzoom.reset(); }});
-        svg.addEventListener("mousedown", function () {{ svg.style.cursor = "grabbing"; }});
-        window.addEventListener("mouseup", function () {{ svg.style.cursor = "grab"; }});
-
-        window.__demo_panzoom = panzoom;
-      }}
-
-      if (document.readyState === "loading") {{
-        document.addEventListener("DOMContentLoaded", init);
-      }} else {{
-        init();
-      }}
-    }})();
-    </script>
     """,
     sizing_mode="stretch_width",
     margin=0,
