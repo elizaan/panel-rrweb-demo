@@ -23,7 +23,7 @@
   <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">
     <text x="190" y="210" font-size="44" font-weight="700" fill="#0f172a">Panel + rrweb demo</text>
     <text x="190" y="255" font-size="20" fill="#334155">Zoom with mouse wheel. Pan by dragging.</text>
-    <text x="190" y="285" font-size="16" fill="#64748b">This SVG is just a placeholder image for the first demo.</text>
+    <text x="190" y="285" font-size="16" fill="#64748b">This SVG is just a placeholder "image" for the first demo.</text>
 
     <g transform="translate(190,330)">
       <circle cx="80" cy="80" r="70" fill="#22c55e" opacity="0.9"/>
@@ -37,7 +37,7 @@
     <g transform="translate(190,510)">
       <rect x="0" y="0" width="520" height="40" rx="12" fill="#0f172a" opacity="0.08"/>
       <rect x="0" y="0" width="310" height="40" rx="12" fill="#0ea5e9" opacity="0.85"/>
-      <text x="16" y="27" font-size="16" font-weight="600" fill="#0f172a">Pretend this is meaningful image content&</text>
+      <text x="16" y="27" font-size="16" font-weight="600" fill="#0f172a">Pretend this is meaningful image content…</text>
     </g>
   </g>
 </svg>
