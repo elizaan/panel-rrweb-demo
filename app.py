@@ -1,264 +1,281 @@
-from __future__ import annotations
+import io
+import urllib.request
 
-import base64
-import json
-from pathlib import Path
-
+import numpy as np
 import panel as pn
+from bokeh.models import WheelZoomTool, PanTool, ResetTool, BoxZoomTool
+from bokeh.plotting import figure
+from PIL import Image
 
-
-ASSETS_DIR = Path(__file__).parent / "assets"
-DEMO_SVG_PATH = ASSETS_DIR / "demo.svg"
-
+# Load Panel and rrweb from CDN
 pn.extension(
+    js_files={"rrweb": "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js"},
+    css_files=["https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.css"],
+)
+
+
+IMAGE_URL = "https://assets.holoviz.org/panel/tutorials/wind_turbine.png"
+
+# --- Load image from URL ---
+with urllib.request.urlopen(IMAGE_URL) as resp:
+    data = resp.read()
+
+img = Image.open(io.BytesIO(data)).convert("RGBA")
+arr = np.asarray(img)
+h, w = arr.shape[:2]
+
+rgba = np.flipud(arr).view(dtype=np.uint32).reshape((h, w))
+
+# --- Bokeh figure ---
+wheel_zoom = WheelZoomTool()
+pan = PanTool()
+box_zoom = BoxZoomTool()
+reset = ResetTool()
+
+p = figure(
+    title="Panel + Bokeh Image Viewer",
+    x_range=(0, w),
+    y_range=(0, h),
+    width=900,
+    height=650,
+    match_aspect=True,
+    toolbar_location="above",
+    tools="",
+)
+p.image_rgba(image=[rgba], x=0, y=0, dw=w, dh=h)
+p.add_tools(wheel_zoom, pan, box_zoom, reset)
+p.toolbar.active_scroll = wheel_zoom
+p.toolbar.active_drag = pan
+p.xaxis.visible = False
+p.yaxis.visible = False
+p.grid.visible = False
+
+plot = pn.pane.Bokeh(p, sizing_mode="stretch_both")
+
+# --- UI widgets ---
+start_btn = pn.widgets.Button(name="Start recording", button_type="success")
+stop_btn = pn.widgets.Button(name="Stop + download JSON", button_type="danger", disabled=True)
+replay_btn = pn.widgets.Button(name="Replay", button_type="primary", disabled=True)
+clear_btn = pn.widgets.Button(name="Clear", button_type="default", disabled=True)
+
+events_json = pn.widgets.TextAreaInput(
+    name="Recorded events (JSON)",
+    placeholder="Click Start recording, interact (zoom/pan), then Stop.",
+    height=180,
     sizing_mode="stretch_width",
-    js_files={
-        # rrweb guide: https://github.com/rrweb-io/rrweb/blob/master/guide.md
-        "rrweb": "https://unpkg.com/rrweb@latest/dist/rrweb.min.js",
-        # Panzoom: https://github.com/timmywil/panzoom
-        "panzoom": "https://unpkg.com/@panzoom/panzoom@4.6.1/dist/panzoom.min.js",
+)
+
+status = pn.pane.Markdown("**Status:** idle", sizing_mode="stretch_width")
+
+replay_container = pn.pane.HTML(
+    """
+    <div data-rrweb-replay="1"
+         style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
+      <div style="padding:10px; opacity:0.7;">No replay yet.</div>
+    </div>
+    """,
+    sizing_mode="stretch_width",
+)
+
+
+
+# --- JS callbacks (Panel expects JS strings) ---
+start_btn.js_on_click(
+    args={
+        "stop_btn": stop_btn,
+        "replay_btn": replay_btn,
+        "clear_btn": clear_btn,
+        "start_btn": start_btn,
+        "status": status,
     },
-    raw_css=[
-        """
-        .demo-card {
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          border-radius: 12px;
-          padding: 12px;
-          background: white;
-        }
-        .rrweb-controls button {
-          border: 1px solid rgba(15, 23, 42, 0.18);
-          border-radius: 10px;
-          padding: 8px 10px;
-          background: rgba(15, 23, 42, 0.04);
-          cursor: pointer;
-        }
-        .rrweb-controls button:hover { background: rgba(15, 23, 42, 0.07); }
-        .rrweb-pill {
-          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-          font-size: 13px;
-          border-radius: 999px;
-          padding: 4px 10px;
-          border: 1px solid rgba(15, 23, 42, 0.14);
-          background: rgba(15, 23, 42, 0.04);
-          user-select: none;
-        }
-        #demo-viewer {
-          cursor: grab !important;
-        }
-        #demo-viewer:active {
-          cursor: grabbing !important;
-        }
-        #demo-viewer svg {
-          cursor: grab !important;
-        }
-        #demo-viewer svg:active {
-          cursor: grabbing !important;
-        }
-        """,
+    code="""
+    console.log("[rrweb-demo] Start clicked");
+
+    if (!window.rrweb || typeof rrweb.record !== "function") {
+      status.object = "**Status:** rrweb not loaded (check Network/Console)";
+      alert("rrweb not loaded. Check Network + Console.");
+      return;
+    }
+
+    window.__rrweb_state = window.__rrweb_state || { stopFn: null, events: [] };
+
+    if (window.__rrweb_state.stopFn) {
+      status.object = "**Status:** already recording";
+      return;
+    }
+
+    window.__rrweb_state.events = [];
+    window.__rrweb_state.stopFn = rrweb.record({
+      emit(event) {
+        window.__rrweb_state.events.push(event);
+      }
+    });
+
+    status.object = "**Status:** 🔴 recording... (zoom/pan now)";
+    start_btn.name = "Recording…";
+    start_btn.button_type = "warning";
+
+    stop_btn.disabled = false;
+    replay_btn.disabled = true;
+    clear_btn.disabled = true;
+
+    console.log("[rrweb-demo] Recording started");
+    """
+)
+
+stop_btn.js_on_click(
+    args={
+        "events_json": events_json,
+        "stop_btn": stop_btn,
+        "replay_btn": replay_btn,
+        "clear_btn": clear_btn,
+        "start_btn": start_btn,
+        "status": status,
+        "replay_container": replay_container,
+    },
+    code="""
+    console.log("[rrweb-demo] Stop clicked");
+
+    if (!window.__rrweb_state || !window.__rrweb_state.stopFn) {
+      status.object = "**Status:** not recording";
+      return;
+    }
+
+    window.__rrweb_state.stopFn();
+    window.__rrweb_state.stopFn = null;
+
+    const events = window.__rrweb_state.events || [];
+    const json = JSON.stringify(events);
+
+    events_json.value = json;
+
+    // download JSON
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "rrweb-session.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    status.object = `**Status:** stopped (events: ${events.length}) ✅`;
+    start_btn.name = "Start recording";
+    start_btn.button_type = "success";
+
+    stop_btn.disabled = true;
+    replay_btn.disabled = (events.length === 0);
+    clear_btn.disabled = (events.length === 0);
+
+    replay_container.object = `
+        <div data-rrweb-replay="1"
+            style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
+            <div style="padding:10px; opacity:0.7;">Ready to replay. Click "Replay".</div>
+        </div>
+    `;
+
+
+    console.log("[rrweb-demo] Stopped. Events:", events.length);
+    """
+)
+
+
+replay_btn.js_on_click(
+    args={"events_json": events_json, "status": status, "replay_container": replay_container},
+    code="""
+    console.log("[rrweb-demo] Replay clicked");
+
+    if (!window.rrweb || typeof rrweb.Replayer !== "function") {
+      status.object = "**Status:** rrweb replayer not available (check Console/Network)";
+      console.error("[rrweb-demo] rrweb or Replayer missing", window.rrweb);
+      return;
+    }
+
+    let events = [];
+    try {
+      events = JSON.parse(events_json.value || "[]");
+    } catch (e) {
+      status.object = "**Status:** JSON parse error";
+      console.error(e);
+      return;
+    }
+
+    if (!events.length) {
+      status.object = "**Status:** no events to replay";
+      return;
+    }
+
+    // Replace the container with a fresh empty root
+    replay_container.object = `
+      <div data-rrweb-replay="1"
+           style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
+        <div data-rrweb-root="1" style="height:100%;"></div>
+      </div>
+    `;
+
+    // Wait for Panel to render the updated HTML, then locate within the document
+    setTimeout(() => {
+      const outer = document.querySelector('[data-rrweb-replay="1"]');
+      const root = outer ? outer.querySelector('[data-rrweb-root="1"]') : null;
+
+      console.log("[rrweb-demo] replay outer:", outer);
+      console.log("[rrweb-demo] replay root:", root);
+
+      if (!root) {
+        status.object = "**Status:** replay root not found (check Console)";
+        return;
+      }
+
+      status.object = `**Status:** replaying (events: ${events.length}) ▶️`;
+
+      // Stop any previous replayer
+      if (window.__rrweb_replayer) {
+        try { window.__rrweb_replayer.pause(); } catch(e) {}
+        window.__rrweb_replayer = null;
+      }
+
+      const replayer = new rrweb.Replayer(events, { root });
+      window.__rrweb_replayer = replayer;
+      replayer.play();
+    }, 200);
+    """
+)
+
+
+
+clear_btn.js_on_click(
+    args={"events_json": events_json, "replay_btn": replay_btn, "clear_btn": clear_btn, "status": status, "replay_container": replay_container},
+    code="""
+    events_json.value = "";
+    replay_btn.disabled = true;
+    clear_btn.disabled = true;
+
+    if (window.__rrweb_state) {
+      window.__rrweb_state.events = [];
+      window.__rrweb_state.stopFn = null;
+    }
+
+    status.object = "**Status:** cleared";
+    replay_container.object = `
+      <div style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
+        <div style="padding:10px; opacity:0.7;">No replay yet.</div>
+      </div>
+    `;
+    """
+)
+
+
+controls = pn.Row(start_btn, stop_btn, replay_btn, clear_btn, sizing_mode="stretch_width")
+
+pn.template.FastListTemplate(
+    title="Panel + Bokeh + rrweb (minimal demo)",
+    main=[
+        controls,
+        status,
+        replay_container,
+        plot,
+        events_json,
     ],
-)
+).servable()
 
-
-title = pn.pane.Markdown(
-    "## Simple Panel dashboard (image + Yes/No) + rrweb recording",
-    margin=(0, 0, 8, 0),
-)
-
-
-# Use raw HTML string parameter which Panel should not sanitize
-rrweb_controls_html = """
-<div class="demo-card rrweb-controls" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-  <strong style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-    rrweb recording
-  </strong>
-  <button id="rrweb-start" type="button">Start recording</button>
-  <button id="rrweb-stop" type="button">Stop &amp; download (.json)</button>
-  <span id="rrweb-status" class="rrweb-pill">idle</span>
-  <span style="opacity:0.75; font-size:13px; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-    (auto-starts after load)
-  </span>
-</div>
-"""
-
-rrweb_controls = pn.pane.HTML(
-    rrweb_controls_html,
-    margin=(0, 0, 10, 0),
-    sizing_mode="stretch_width",
-)
-
-
-# Store SVG content
-svg_text = DEMO_SVG_PATH.read_text(encoding="utf-8")
-if svg_text.lstrip().startswith("<?xml"):
-    svg_text = "\n".join(svg_text.splitlines()[1:])
-
-# Use raw HTML directly
-image_viewer = pn.pane.HTML(
-    f"""
-<div class="demo-card">
-  <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-              font-weight:600; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
-    <span>Image viewer (pan + zoom)</span>
-    <span id="zoom-indicator" style="font-size:12px; color:#64748b; font-weight:400;">100%</span>
-  </div>
-  <div id="demo-viewer"
-       style="width:100%; height:750px; overflow:hidden; border-radius:10px;
-              border: 1px solid rgba(15, 23, 42, 0.12); background: rgba(15, 23, 42, 0.02);
-              touch-action:none; user-select:none; display:flex; align-items:center; justify-content:center;">
-    {svg_text}
-  </div>
-  <div style="margin-top:8px; opacity:0.75; font-size:13px;
-              font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-    🖱️ Wheel = zoom, drag = pan, double-click = reset
-  </div>
-</div>
-""",
-    sizing_mode="stretch_width",
-    margin=0,
-)
-
-
-yes_btn = pn.widgets.Button(name="Yes", button_type="success", width=120)
-no_btn = pn.widgets.Button(name="No", button_type="danger", width=120)
-decision = pn.pane.Markdown("**Decision**: _none yet_", margin=(10, 0, 0, 0))
-
-
-def _set_decision(value: str) -> None:
-    decision.object = f"**Decision**: `{value}`"
-
-
-yes_btn.on_click(lambda *_: _set_decision("yes"))
-no_btn.on_click(lambda *_: _set_decision("no"))
-
-controls = pn.Column(
-    pn.pane.Markdown("### Simple Yes/No buttons", margin=(0, 0, 8, 0)),
-    pn.Row(yes_btn, no_btn),
-    decision,
-    pn.layout.Spacer(height=8),
-    pn.pane.Markdown(
-        """
-        **What rrweb records here**
-
-        - Clicking **Yes/No**
-        - Panning/zooming the image viewer (mouse events)
-        - Any scrolling / typing / focus changes in the page
-        """,
-        margin=0,
-    ),
-    css_classes=["demo-card"],
-    width=360,
-)
-
-
-# Load demo.js content
-demo_js_content = (ASSETS_DIR / "demo.js").read_text(encoding="utf-8")
-
-# Wrapper script to wait for Bokeh and assign IDs before demo.js runs
-wrapper_script = """
-(function() {
-  console.log('=== Starting ID assignment ===');
-  
-  let attempts = 0;
-  const maxAttempts = 50;
-  
-  function assignIds() {
-    const allDivs = document.getElementsByTagName('div');
-    const allSpans = document.getElementsByTagName('span');
-    const allButtons = document.getElementsByTagName('button');
-    
-    let assigned = 0;
-    
-    // Find demo-viewer (div with SVG)
-    for (let div of allDivs) {
-      if (div.querySelector('svg') && !div.id) {
-        div.id = 'demo-viewer';
-        console.log('✓ Assigned id=demo-viewer');
-        assigned++;
-        break;
-      }
-    }
-    
-    // Find zoom indicator (span with "100%")
-    for (let span of allSpans) {
-      if (span.textContent.trim() === '100%' && !span.id) {
-        span.id = 'zoom-indicator';
-        console.log('✓ Assigned id=zoom-indicator');
-        assigned++;
-        break;
-      }
-    }
-    
-    // Find rrweb buttons
-    for (let btn of allButtons) {
-      const text = btn.textContent.trim();
-      if (text === 'Start recording' && !btn.id) {
-        btn.id = 'rrweb-start';
-        console.log('✓ Assigned id=rrweb-start');
-        assigned++;
-      } else if (text.includes('Stop') && !btn.id) {
-        btn.id = 'rrweb-stop';
-        console.log('✓ Assigned id=rrweb-stop');
-        assigned++;
-      }
-    }
-    
-    // Find status pill
-    const pill = document.querySelector('.rrweb-pill');
-    if (pill && !pill.id) {
-      pill.id = 'rrweb-status';
-      console.log('✓ Assigned id=rrweb-status');
-      assigned++;
-    }
-    
-    return assigned >= 5;
-  }
-  
-  function checkAndAssign() {
-    const svgCount = document.getElementsByTagName('svg').length;
-    const btnCount = document.getElementsByTagName('button').length;
-    
-    if (attempts % 10 === 0) {
-      console.log('Check ' + attempts + ' - SVG: ' + svgCount + ' Buttons: ' + btnCount);
-    }
-    
-    if (svgCount > 0 && btnCount >= 2) {
-      console.log('✓ Content found! Assigning IDs...');
-      if (assignIds()) {
-        clearInterval(pollInterval);
-        console.log('✓✓✓ All IDs assigned successfully!');
-        return true;
-      }
-    }
-    
-    attempts++;
-    if (attempts >= maxAttempts) {
-      console.error('Timeout: Could not find all elements after ' + maxAttempts + ' attempts');
-      clearInterval(pollInterval);
-      return false;
-    }
-    
-    return false;
-  }
-  
-  const pollInterval = setInterval(checkAndAssign, 100);
-})();
-"""
-
-# Build script using string concatenation to avoid f-string brace conflicts
-demo_script = pn.pane.HTML(
-    "<script type=\"text/javascript\">\n" + wrapper_script + "\n" + demo_js_content + "\n</script>",
-    sizing_mode="fixed",
-    width=0,
-    height=0,
-)
-
-app = pn.Column(
-    title,
-    rrweb_controls,
-    pn.Row(image_viewer, controls, sizing_mode="stretch_width"),
-    demo_script,
-    sizing_mode="stretch_width",
-)
-
-app.servable()
