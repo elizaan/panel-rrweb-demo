@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import urllib.request
 
 import numpy as np
@@ -7,6 +8,87 @@ import panel as pn
 from bokeh.models import WheelZoomTool, PanTool, ResetTool, BoxZoomTool
 from bokeh.plotting import figure
 from PIL import Image
+
+# Enhanced WebSocket logging with code explanations
+class WebSocketLogFilter(logging.Filter):
+    """Add context and explanations to WebSocket log messages"""
+    
+    # WebSocket close codes (RFC 6455)
+    CLOSE_CODES = {
+        1000: "Normal Closure - Connection completed successfully",
+        1001: "Going Away - Browser tab closed or navigated away",
+        1002: "Protocol Error - WebSocket protocol violation",
+        1003: "Unsupported Data - Received incompatible data type",
+        1005: "No Status Received - No close code provided",
+        1006: "Abnormal Closure - Connection lost without close frame",
+        1007: "Invalid Data - Received invalid UTF-8 or message payload",
+        1008: "Policy Violation - Endpoint policy violated",
+        1009: "Message Too Big - Message too large to process",
+        1010: "Mandatory Extension - Required extension not negotiated",
+        1011: "Internal Error - Unexpected server condition",
+        1015: "TLS Handshake Failed - TLS/SSL handshake error",
+    }
+    
+    def filter(self, record):
+        # Check the unformatted message first to avoid formatting errors
+        original_msg = record.msg if isinstance(record.msg, str) else str(record.msg)
+        
+        # Enhance connection opened messages
+        if "WebSocket connection opened" in original_msg:
+            record.msg = "WebSocket connection opened - Client connected to server"
+            record.args = ()  # Clear args since we're replacing the message
+            return True
+        
+        # Enhance connection closed messages with code explanations
+        if "WebSocket connection closed" in original_msg:
+            # Extract code and reason from args if available
+            code = None
+            reason = None
+            
+            if record.args and len(record.args) >= 2:
+                code = record.args[0]
+                reason = record.args[1]
+            
+            # Build enhanced message
+            parts = ["WebSocket connection closed"]
+            
+            if code is not None and str(code) != 'None':
+                try:
+                    code_int = int(code) if not isinstance(code, int) else code
+                    explanation = self.CLOSE_CODES.get(code_int, f"Unknown code {code_int}")
+                    parts.append(f"[Code {code_int}: {explanation}]")
+                except (ValueError, TypeError):
+                    parts.append(f"[Code {code}]")
+            else:
+                parts.append("[No close code - likely client refresh/reload]")
+            
+            if reason and str(reason) != 'None':
+                parts.append(f"Reason: {reason}")
+            
+            record.msg = " ".join(parts)
+            record.args = ()  # Clear args since we're replacing the message
+            return True
+        
+        # Enhance ServerConnection messages
+        if "ServerConnection created" in original_msg:
+            record.msg = "ServerConnection created - New session established"
+            record.args = ()  # Clear args since we're replacing the message
+            return True
+        
+        return True
+
+# Apply the filter to Panel/Bokeh loggers
+websocket_filter = WebSocketLogFilter()
+for logger_name in ['bokeh.server.views.ws', 'tornado.access', 'panel', 'bokeh']:
+    logger = logging.getLogger(logger_name)
+    logger.addFilter(websocket_filter)
+
+# Configure logging format for better readability
+logging.basicConfig(
+    format='%(asctime)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=logging.INFO
+)
 
 # Load Panel + rrweb + rrweb-player from CDN
 pn.extension(
@@ -19,6 +101,12 @@ pn.extension(
     "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css",
   ],
 )
+
+# Configure Tornado to allow large WebSocket messages (for large rrweb JSON files)
+# This must be done at server startup. Start the server with:
+# panel serve app.py --show --autoreload --websocket-max-message-size=209715200
+# (209715200 bytes = 200MB)
+print("[rrweb-demo] For large JSON files (>50MB), start server with: panel serve app.py --websocket-max-message-size=209715200")
 
 
 IMAGE_URL = "https://assets.holoviz.org/panel/tutorials/wind_turbine.png"
@@ -75,6 +163,9 @@ events_json = pn.widgets.TextAreaInput(
 )
 
 status = pn.pane.Markdown("**Status:** idle", sizing_mode="stretch_width")
+
+# Hidden HTML pane to inject JSON data (used as fallback if execute_script not available)
+json_injector = pn.pane.HTML("", width=0, height=0, sizing_mode="fixed")
 
 # --- JS callbacks (Panel expects JS strings) ---
 start_btn.js_on_click(
@@ -577,37 +668,69 @@ def _load_rrweb_json(event):
     except Exception:
         text = ""
     
-    # Store uploaded JSON in browser memory for replay
+    # Store uploaded JSON in browser memory for replay (avoid WebSocket size limits)
     if text.strip():
         try:
             parsed = json.loads(text)
             event_count = len(parsed) if isinstance(parsed, list) else None
             
-            # Show summary (don't send full JSON via WebSocket)
+            # Show summary (don't send full JSON via WebSocket - would exceed message limit!)
             sizeKB = round(len(text) / 1024)
             sizeMB = round(sizeKB / 1024, 2)
-            summary = f"Uploaded: {event_count} events, {sizeMB}MB\n(JSON ready for replay)"
+            summary = f"Uploaded: {event_count} events, {sizeMB}MB\n(JSON stored in browser memory for replay)"
             events_json.value = summary
             
             # Store in browser memory via JS execution
             # Use json.dumps to safely escape the parsed JSON for embedding in JS
             json_safe = json.dumps(parsed)
-            pn.state.execute_script(f"""
-                window.__rrweb_state = window.__rrweb_state || {{}};
-                window.__rrweb_state.events = {json_safe};
-                console.log('[rrweb-demo] Loaded', {event_count}, 'events from file into browser memory');
-            """)            
+            
+            # Try multiple methods to inject JSON into browser memory
+            injection_success = False
+            try:
+                # Method 1: Use pn.state.execute_script if available (Panel 1.0+)
+                if hasattr(pn.state, 'execute_script'):
+                    pn.state.execute_script(f"""
+                        window.__rrweb_state = window.__rrweb_state || {{}};
+                        window.__rrweb_state.events = {json_safe};
+                        console.log('[rrweb-demo] Loaded', {event_count}, 'events from file into browser memory via execute_script');
+                    """)
+                    print(f"[rrweb-demo] Injected {event_count} events into browser memory via execute_script")
+                    injection_success = True
+                # Method 2: Use HTML pane with inline script as fallback
+                else:
+                    # Update the hidden HTML injector pane with a script that loads the data
+                    json_injector.object = f"""
+                        <script>
+                        (function() {{
+                            window.__rrweb_state = window.__rrweb_state || {{}};
+                            window.__rrweb_state.events = {json_safe};
+                            console.log('[rrweb-demo] Loaded', {event_count}, 'events from file into browser memory via HTML injector');
+                        }})();
+                        </script>
+                    """
+                    print(f"[rrweb-demo] Set HTML injector for {event_count} events (fallback method)")
+                    injection_success = True
+            except Exception as js_err:
+                print(f"[rrweb-demo] Failed to inject JSON into browser memory: {js_err}")
+                injection_success = False
+            
+            if not injection_success:
+                # If injection fails, the replay button will try to parse from events_json
+                # but this will fail for large files due to WebSocket limits
+                status.object = f"**Status:** loaded {event_count} events ({sizeMB}MB) - Warning: may not replay properly for large files"
+                return
+            
             replay_btn.disabled = False
             clear_btn.disabled = False
             status.object = f"**Status:** loaded {event_count} events ({sizeMB}MB)"
         except Exception as e:
             events_json.value = "Failed to parse uploaded JSON"
-            status.object = "**Status:** file load failed"
+            status.object = f"**Status:** file load failed - {str(e)}"
             replay_btn.disabled = True
             clear_btn.disabled = True
     else:
         events_json.value = ""
-        status.object = "**Status:** file load failed"
+        status.object = "**Status:** file load failed - empty file"
         replay_btn.disabled = True
         clear_btn.disabled = True
 
@@ -620,6 +743,7 @@ controls = pn.Row(start_btn, stop_btn, replay_btn, clear_btn, file_input, sizing
 pn.template.FastListTemplate(
     title="Panel + Bokeh + rrweb (minimal demo)",
     main=[
+        json_injector,  # Hidden HTML pane for JS injection (fallback method)
         controls,
         status,
         plot,

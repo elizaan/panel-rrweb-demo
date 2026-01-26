@@ -13,8 +13,21 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-panel serve app.py --show --autoreload
+# Standard run (default WebSocket limit ~10MB)
+panel serve app.py --show --autoreload 
+
+# For large JSON files: increase WebSocket message size limit to 200MB
+panel serve app.py --show --autoreload --websocket-max-message-size=209715200
 ```
+
+**Note:** The `--websocket-max-message-size` flag accepts bytes. Common values:
+- 50MB = `52428800`
+- 100MB = `104857600`
+- 200MB = `209715200` (recommended for large recordings)
+- 500MB = `524288000`
+- 1GB = `1073741824`
+
+Adjust based on your largest expected recording file size.
 
 ## Use the demo
 
