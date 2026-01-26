@@ -1,4 +1,5 @@
 import io
+import json
 import urllib.request
 
 import numpy as np
@@ -7,10 +8,16 @@ from bokeh.models import WheelZoomTool, PanTool, ResetTool, BoxZoomTool
 from bokeh.plotting import figure
 from PIL import Image
 
-# Load Panel and rrweb from CDN
+# Load Panel + rrweb + rrweb-player from CDN
 pn.extension(
-    js_files={"rrweb": "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js"},
-    css_files=["https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.css"],
+  js_files={
+    "rrweb": "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js",
+    "rrwebPlayer": "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js",
+  },
+  css_files=[
+    "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/style.css",
+    "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css",
+  ],
 )
 
 
@@ -58,6 +65,8 @@ stop_btn = pn.widgets.Button(name="Stop + download JSON", button_type="danger", 
 replay_btn = pn.widgets.Button(name="Replay", button_type="primary", disabled=True)
 clear_btn = pn.widgets.Button(name="Clear", button_type="default", disabled=True)
 
+file_input = pn.widgets.FileInput(name="Load saved rrweb JSON", accept=".json")
+
 events_json = pn.widgets.TextAreaInput(
     name="Recorded events (JSON)",
     placeholder="Click Start recording, interact (zoom/pan), then Stop.",
@@ -66,18 +75,6 @@ events_json = pn.widgets.TextAreaInput(
 )
 
 status = pn.pane.Markdown("**Status:** idle", sizing_mode="stretch_width")
-
-replay_container = pn.pane.HTML(
-    """
-    <div data-rrweb-replay="1"
-         style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
-      <div style="padding:10px; opacity:0.7;">No replay yet.</div>
-    </div>
-    """,
-    sizing_mode="stretch_width",
-)
-
-
 
 # --- JS callbacks (Panel expects JS strings) ---
 start_btn.js_on_click(
@@ -91,35 +88,141 @@ start_btn.js_on_click(
     code="""
     console.log("[rrweb-demo] Start clicked");
 
-    if (!window.rrweb || typeof rrweb.record !== "function") {
-      status.object = "**Status:** rrweb not loaded (check Network/Console)";
-      alert("rrweb not loaded. Check Network + Console.");
-      return;
+    const RRWEB_URL = "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js";
+    const RRWEB_CSS = "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/style.css";
+
+    function ensureCss(href) {
+      if ([...document.styleSheets].some(s => (s.href || "").includes(href))) return;
+      if (document.querySelector(`link[rel="stylesheet"][href="${href}"]`)) return;
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = href;
+      document.head.appendChild(link);
     }
 
-    window.__rrweb_state = window.__rrweb_state || { stopFn: null, events: [] };
-
-    if (window.__rrweb_state.stopFn) {
-      status.object = "**Status:** already recording";
-      return;
+    function ensureScript(src, checkFn) {
+      return new Promise((resolve, reject) => {
+        try {
+          if (checkFn()) return resolve(true);
+          if (document.querySelector(`script[src="${src}"]`)) {
+            // already requested; wait a bit
+            const t0 = Date.now();
+            const tick = () => {
+              if (checkFn()) return resolve(true);
+              if (Date.now() - t0 > 8000) return reject(new Error("Timed out loading " + src));
+              setTimeout(tick, 100);
+            };
+            return tick();
+          }
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error("Failed to load " + src));
+          document.head.appendChild(s);
+        } catch (e) {
+          reject(e);
+        }
+      });
     }
 
-    window.__rrweb_state.events = [];
-    window.__rrweb_state.stopFn = rrweb.record({
-      emit(event) {
-        window.__rrweb_state.events.push(event);
+    async function startRecording() {
+      window.__rrweb_state = window.__rrweb_state || { stopFn: null, events: [], canvasInterval: null };
+
+      if (window.__rrweb_state.stopFn) {
+        status.object = "**Status:** already recording";
+        return;
       }
-    });
 
-    status.object = "**Status:** 🔴 recording... (zoom/pan now)";
-    start_btn.name = "Recording…";
-    start_btn.button_type = "warning";
+      window.__rrweb_state.events = [];
+      window.__rrweb_state.stopFn = rrweb.record({
+        emit(event) {
+          window.__rrweb_state.events.push(event);
+        },
+        recordCanvas: true,
+      });
 
-    stop_btn.disabled = false;
-    replay_btn.disabled = true;
-    clear_btn.disabled = true;
+      // Explicit canvas bitmap capture for Bokeh layers
+      let canvasSnapshotCount = 0;
+      let totalDataSize = 0;
+      window.__rrweb_state.canvasInterval = setInterval(() => {
+        try {
+          const canvases = document.querySelectorAll('canvas.bk-layer');
+          if (!canvases || canvases.length === 0) return;
+          
+          const snapshots = [];
+          canvases.forEach((canvas, idx) => {
+            try {
+              // Try to capture canvas bitmap with lower quality to reduce size
+              const dataURL = canvas.toDataURL('image/jpeg', 0.6); // JPEG at 60% quality
+              const sizeKB = Math.round(dataURL.length / 1024);
+              totalDataSize += dataURL.length;
+              
+              snapshots.push({
+                index: idx,
+                width: canvas.width,
+                height: canvas.height,
+                dataURL: dataURL,
+                sizeKB: sizeKB,
+                id: canvas.getAttribute('data-canvas-id') || `bokeh-canvas-${idx}`
+              });
+            } catch (e) {
+              console.warn(`[rrweb-demo] Canvas ${idx} tainted or failed:`, e.message);
+            }
+          });
+          
+          if (snapshots.length > 0) {
+            // Push custom event (type 5) with canvas snapshots
+            window.__rrweb_state.events.push({
+              type: 5, // Custom event
+              data: {
+                tag: 'canvas-snapshot',
+                payload: {
+                  snapshots: snapshots,
+                  timestamp: Date.now()
+                }
+              },
+              timestamp: Date.now()
+            });
+            canvasSnapshotCount++;
+            const totalSizeKB = Math.round(snapshots.reduce((sum, s) => sum + s.sizeKB, 0));
+            console.log(`[rrweb-demo] Snapshot ${canvasSnapshotCount}: ${snapshots.length} canvases, ${totalSizeKB}KB (total: ${Math.round(totalDataSize/1024)}KB)`);
+          }
+        } catch (e) {
+          console.error('[rrweb-demo] Canvas capture error:', e);
+        }
+      }, 1000); // Capture every 1 second (reduced from 200ms)
 
-    console.log("[rrweb-demo] Recording started");
+      status.object = "**Status:** 🔴 recording... (zoom/pan now)";
+      start_btn.name = "Recording…";
+      start_btn.button_type = "warning";
+
+      stop_btn.disabled = false;
+      replay_btn.disabled = true;
+      clear_btn.disabled = true;
+
+      console.log("[rrweb-demo] Recording started with canvas capture");
+    }
+
+    (async () => {
+      try {
+        ensureCss(RRWEB_CSS);
+        if (!window.rrweb || typeof rrweb.record !== "function") {
+          status.object = "**Status:** loading rrweb…";
+          await ensureScript(RRWEB_URL, () => window.rrweb && typeof rrweb.record === "function");
+        }
+        if (!window.rrweb || typeof rrweb.record !== "function") {
+          status.object = "**Status:** rrweb not loaded (check Console/Network)";
+          alert("rrweb not loaded. Check Network + Console.");
+          return;
+        }
+        await startRecording();
+      } catch (e) {
+        console.error("[rrweb-demo] Failed to load/start rrweb", e);
+        status.object = "**Status:** failed to load rrweb (see Console)";
+        alert("Failed to load rrweb. Check Network + Console.");
+      }
+    })();
     """
 )
 
@@ -131,7 +234,6 @@ stop_btn.js_on_click(
         "clear_btn": clear_btn,
         "start_btn": start_btn,
         "status": status,
-        "replay_container": replay_container,
     },
     code="""
     console.log("[rrweb-demo] Stop clicked");
@@ -143,11 +245,22 @@ stop_btn.js_on_click(
 
     window.__rrweb_state.stopFn();
     window.__rrweb_state.stopFn = null;
+    
+    // Stop canvas capture interval
+    if (window.__rrweb_state.canvasInterval) {
+      clearInterval(window.__rrweb_state.canvasInterval);
+      window.__rrweb_state.canvasInterval = null;
+      console.log('[rrweb-demo] Canvas capture interval cleared');
+    }
 
     const events = window.__rrweb_state.events || [];
     const json = JSON.stringify(events);
+    const sizeKB = Math.round(json.length / 1024);
+    const sizeMB = (sizeKB / 1024).toFixed(2);
 
-    events_json.value = json;
+    // Show summary only (don't send full JSON via WebSocket - would exceed message limit!)
+    const summary = `Recorded: ${events.length} events, ${sizeMB}MB\n(JSON kept in browser memory, downloaded to file)`;
+    events_json.value = summary;
 
     // download JSON
     const blob = new Blob([json], { type: "application/json" });
@@ -160,7 +273,7 @@ stop_btn.js_on_click(
     a.remove();
     URL.revokeObjectURL(url);
 
-    status.object = `**Status:** stopped (events: ${events.length}) ✅`;
+    status.object = `**Status:** stopped (${events.length} events, ${sizeMB}MB) ✅`;
     start_btn.name = "Start recording";
     start_btn.button_type = "success";
 
@@ -168,88 +281,283 @@ stop_btn.js_on_click(
     replay_btn.disabled = (events.length === 0);
     clear_btn.disabled = (events.length === 0);
 
-    replay_container.object = `
-        <div data-rrweb-replay="1"
-            style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
-            <div style="padding:10px; opacity:0.7;">Ready to replay. Click "Replay".</div>
-        </div>
-    `;
-
-
     console.log("[rrweb-demo] Stopped. Events:", events.length);
     """
 )
 
 
 replay_btn.js_on_click(
-    args={"events_json": events_json, "status": status, "replay_container": replay_container},
+    args={"events_json": events_json, "status": status},
     code="""
     console.log("[rrweb-demo] Replay clicked");
+    console.log("[rrweb-demo] window.rrwebPlayer available?", typeof window.rrwebPlayer);
 
-    if (!window.rrweb || typeof rrweb.Replayer !== "function") {
-      status.object = "**Status:** rrweb replayer not available (check Console/Network)";
-      console.error("[rrweb-demo] rrweb or Replayer missing", window.rrweb);
-      return;
+    const RRWEB_PLAYER_URL = "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js";
+    const RRWEB_PLAYER_CSS = "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css";
+
+    function ensureCss(href) {
+      if ([...document.styleSheets].some(s => (s.href || "").includes(href))) return;
+      if (document.querySelector(`link[rel="stylesheet"][href="${href}"]`)) return;
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = href;
+      document.head.appendChild(link);
+      console.log("[rrweb-demo] Added CSS:", href);
     }
 
-    let events = [];
-    try {
-      events = JSON.parse(events_json.value || "[]");
-    } catch (e) {
-      status.object = "**Status:** JSON parse error";
-      console.error(e);
-      return;
+    function ensureScript(src, checkFn) {
+      return new Promise((resolve, reject) => {
+        try {
+          if (checkFn()) {
+            console.log("[rrweb-demo] Script already loaded:", src);
+            return resolve(true);
+          }
+          if (document.querySelector(`script[src="${src}"]`)) {
+            console.log("[rrweb-demo] Script tag exists, waiting for load:", src);
+            const t0 = Date.now();
+            const tick = () => {
+              if (checkFn()) {
+                console.log("[rrweb-demo] Script now available:", src);
+                return resolve(true);
+              }
+              if (Date.now() - t0 > 8000) {
+                console.error("[rrweb-demo] Timeout loading:", src);
+                return reject(new Error("Timed out loading " + src));
+              }
+              setTimeout(tick, 100);
+            };
+            return tick();
+          }
+          console.log("[rrweb-demo] Loading script:", src);
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => {
+            console.log("[rrweb-demo] Script loaded successfully:", src);
+            resolve(true);
+          };
+          s.onerror = () => {
+            console.error("[rrweb-demo] Failed to load script:", src);
+            reject(new Error("Failed to load " + src));
+          };
+          document.head.appendChild(s);
+        } catch (e) {
+          console.error("[rrweb-demo] Error in ensureScript:", e);
+          reject(e);
+        }
+      });
     }
 
-    if (!events.length) {
-      status.object = "**Status:** no events to replay";
-      return;
-    }
+    async function doReplay() {
+      console.log("[rrweb-demo] doReplay started");
+      
+      if (typeof window.rrwebPlayer !== "function") {
+        status.object = "**Status:** loading rrweb-player…";
+        console.log("[rrweb-demo] rrwebPlayer not found, loading from CDN");
+        ensureCss(RRWEB_PLAYER_CSS);
+        await ensureScript(RRWEB_PLAYER_URL, () => typeof window.rrwebPlayer === "function");
+        console.log("[rrweb-demo] After ensureScript, rrwebPlayer type:", typeof window.rrwebPlayer);
+      }
 
-    // Replace the container with a fresh empty root
-    replay_container.object = `
-      <div data-rrweb-replay="1"
-           style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
-        <div data-rrweb-root="1" style="height:100%;"></div>
-      </div>
-    `;
-
-    // Wait for Panel to render the updated HTML, then locate within the document
-    setTimeout(() => {
-      const outer = document.querySelector('[data-rrweb-replay="1"]');
-      const root = outer ? outer.querySelector('[data-rrweb-root="1"]') : null;
-
-      console.log("[rrweb-demo] replay outer:", outer);
-      console.log("[rrweb-demo] replay root:", root);
-
-      if (!root) {
-        status.object = "**Status:** replay root not found (check Console)";
+      if (typeof window.rrwebPlayer !== "function") {
+        status.object = "**Status:** rrweb-player not loaded (check Console/Network)";
+        console.error("[rrweb-demo] rrwebPlayer still missing after load attempt", window.rrwebPlayer);
+        console.error("[rrweb-demo] window keys:", Object.keys(window).filter(k => k.toLowerCase().includes('rrweb')));
         return;
       }
 
-      status.object = `**Status:** replaying (events: ${events.length}) ▶️`;
-
-      // Stop any previous replayer
-      if (window.__rrweb_replayer) {
-        try { window.__rrweb_replayer.pause(); } catch(e) {}
-        window.__rrweb_replayer = null;
+      let events = [];
+      try {
+        // Try browser memory first (if we just recorded)
+        if (window.__rrweb_state && window.__rrweb_state.events && window.__rrweb_state.events.length > 0) {
+          events = window.__rrweb_state.events;
+          console.log("[rrweb-demo] Using events from browser memory:", events.length);
+        } else {
+          // Try parsing from widget (for uploaded files)
+          events = JSON.parse(events_json.value || "[]");
+          console.log("[rrweb-demo] Parsed events from widget:", events.length);
+        }
+      } catch (e) {
+        status.object = "**Status:** no events available (upload JSON file or record first)";
+        console.error("[rrweb-demo] No events available:", e);
+        return;
       }
 
-      const replayer = new rrweb.Replayer(events, { root });
-      window.__rrweb_replayer = replayer;
-      replayer.play();
-    }, 200);
+      if (!events.length) {
+        status.object = "**Status:** no events to replay";
+        console.warn("[rrweb-demo] No events to replay");
+        return;
+      }
+
+      status.object = `**Status:** mounting player (events: ${events.length})…`;
+      console.log("[rrweb-demo] Setting up replay container");
+      
+      // Create or find container at the document body level (bypass Panel isolation)
+      let root = document.getElementById("rrweb-replay-root");
+      
+      if (!root) {
+        console.log("[rrweb-demo] Creating replay root at document.body level");
+        
+        // Create a fixed-position overlay container
+        const overlay = document.createElement('div');
+        overlay.id = 'rrweb-overlay';
+        overlay.style.cssText = `
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          width: 90vw;
+          max-width: 1200px;
+          height: 80vh;
+          background: white;
+          border: 2px solid #333;
+          border-radius: 8px;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+          z-index: 10000;
+          display: flex;
+          flex-direction: column;
+        `;
+        
+        const header = document.createElement('div');
+        header.style.cssText = 'padding: 10px; background: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; align-items: center;';
+        header.innerHTML = '<strong>rrweb Replay</strong><button id="close-replay" style="background:#dc3545; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Close</button>';
+        
+        root = document.createElement('div');
+        root.id = 'rrweb-replay-root';
+        root.style.cssText = 'flex: 1; overflow: hidden; background: white;';
+        
+        overlay.appendChild(header);
+        overlay.appendChild(root);
+        document.body.appendChild(overlay);
+        
+        document.getElementById('close-replay').onclick = () => {
+          document.body.removeChild(overlay);
+          status.object = "**Status:** replay closed";
+        };
+        
+        console.log("[rrweb-demo] Created overlay replay container");
+      } else {
+        console.log("[rrweb-demo] Reusing existing replay root");
+      }
+
+      root.innerHTML = "";
+      root.style.background = "#fff";
+
+      if (window.__rrweb_player) {
+        console.log("[rrweb-demo] Destroying existing player");
+        try {
+          const rep = window.__rrweb_player.getReplayer ? window.__rrweb_player.getReplayer() : null;
+          if (rep && rep.destroy) rep.destroy();
+        } catch (e) {
+          console.warn("[rrweb-demo] Error destroying old player:", e);
+        }
+        window.__rrweb_player = null;
+      }
+
+      status.object = `**Status:** replaying (events: ${events.length}) ▶️`;
+      console.log("[rrweb-demo] Creating new rrwebPlayer with config:", {
+        events: events.length,
+        width: root.clientWidth || 1000,
+        height: root.clientHeight || 600
+      });
+      
+      // Count canvas snapshot events
+      const canvasEvents = events.filter(e => e.type === 5 && e.data && e.data.tag === 'canvas-snapshot');
+      console.log(`[rrweb-demo] Found ${canvasEvents.length} canvas snapshot events`);
+      
+      try {
+        window.__rrweb_player = new rrwebPlayer({
+          target: root,
+          props: {
+            events,
+            autoPlay: true,
+            showController: true,
+            width: root.clientWidth || 1000,
+            height: root.clientHeight || 600,
+            UNSAFE_replayCanvas: true,
+          },
+        });
+        console.log("[rrweb-demo] Player created successfully", window.__rrweb_player);
+        
+        // Hook into replayer to restore canvas snapshots
+        try {
+          const replayer = window.__rrweb_player.getReplayer();
+          if (replayer) {
+            let lastCanvasRestore = 0;
+            replayer.on('event-cast', (event) => {
+              if (event.type === 5 && event.data && event.data.tag === 'canvas-snapshot') {
+                const snapshots = event.data.payload.snapshots || [];
+                const iframe = root.querySelector('iframe');
+                if (!iframe) return;
+                
+                const replayDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (!replayDoc) return;
+                
+                snapshots.forEach(snapshot => {
+                  const canvases = replayDoc.querySelectorAll('canvas.bk-layer');
+                  if (canvases[snapshot.index]) {
+                    const canvas = canvases[snapshot.index];
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                      const img = new Image();
+                      img.onload = () => {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0);
+                        lastCanvasRestore++;
+                        if (lastCanvasRestore % 10 === 0) {
+                          console.log(`[rrweb-demo] Restored ${lastCanvasRestore} canvas snapshots`);
+                        }
+                      };
+                      img.src = snapshot.dataURL;
+                    }
+                  }
+                });
+              }
+            });
+            console.log('[rrweb-demo] Canvas restoration hook installed');
+          }
+        } catch (hookErr) {
+          console.warn('[rrweb-demo] Could not install canvas restoration hook:', hookErr);
+        }
+      } catch (e) {
+        console.error("[rrweb-demo] Failed to mount rrwebPlayer", e);
+        console.error("[rrweb-demo] Error stack:", e.stack);
+        status.object = "**Status:** replay failed to mount (see Console)";
+        try {
+          root.innerHTML = `<div style="padding:10px; color:#b00020; font-family:monospace; white-space:pre-wrap;">${String(e && (e.stack || e.message || e))}</div>`;
+        } catch (_) {}
+      }
+    }
+
+    (async () => {
+      try {
+        await doReplay();
+        console.log("[rrweb-demo] Replay sequence completed");
+      } catch (e) {
+        console.error("[rrweb-demo] Replay failed at top level", e);
+        console.error("[rrweb-demo] Error stack:", e.stack);
+        status.object = "**Status:** replay failed (see Console)";
+      }
+    })();
     """
 )
 
 
 
 clear_btn.js_on_click(
-    args={"events_json": events_json, "replay_btn": replay_btn, "clear_btn": clear_btn, "status": status, "replay_container": replay_container},
+    args={"events_json": events_json, "replay_btn": replay_btn, "clear_btn": clear_btn, "status": status},
     code="""
-    events_json.value = "";
+    events_json.value = "No events recorded";
     replay_btn.disabled = true;
     clear_btn.disabled = true;
+
+    if (window.__rrweb_player) {
+      try {
+        const rep = window.__rrweb_player.getReplayer ? window.__rrweb_player.getReplayer() : null;
+        if (rep && rep.destroy) rep.destroy();
+      } catch (e) {}
+      window.__rrweb_player = null;
+    }
 
     if (window.__rrweb_state) {
       window.__rrweb_state.events = [];
@@ -257,23 +565,63 @@ clear_btn.js_on_click(
     }
 
     status.object = "**Status:** cleared";
-    replay_container.object = `
-      <div style="height:420px; border:1px solid #ddd; border-radius:8px; overflow:hidden;">
-        <div style="padding:10px; opacity:0.7;">No replay yet.</div>
-      </div>
-    `;
     """
 )
 
 
-controls = pn.Row(start_btn, stop_btn, replay_btn, clear_btn, sizing_mode="stretch_width")
+def _load_rrweb_json(event):
+    if not event.new:
+        return
+    try:
+        text = event.new.decode("utf-8")
+    except Exception:
+        text = ""
+    
+    # Store uploaded JSON in browser memory for replay
+    if text.strip():
+        try:
+            parsed = json.loads(text)
+            event_count = len(parsed) if isinstance(parsed, list) else None
+            
+            # Show summary (don't send full JSON via WebSocket)
+            sizeKB = round(len(text) / 1024)
+            sizeMB = round(sizeKB / 1024, 2)
+            summary = f"Uploaded: {event_count} events, {sizeMB}MB\n(JSON ready for replay)"
+            events_json.value = summary
+            
+            # Store in browser memory via JS execution
+            # Use json.dumps to safely escape the parsed JSON for embedding in JS
+            json_safe = json.dumps(parsed)
+            pn.state.execute_script(f"""
+                window.__rrweb_state = window.__rrweb_state || {{}};
+                window.__rrweb_state.events = {json_safe};
+                console.log('[rrweb-demo] Loaded', {event_count}, 'events from file into browser memory');
+            """)            
+            replay_btn.disabled = False
+            clear_btn.disabled = False
+            status.object = f"**Status:** loaded {event_count} events ({sizeMB}MB)"
+        except Exception as e:
+            events_json.value = "Failed to parse uploaded JSON"
+            status.object = "**Status:** file load failed"
+            replay_btn.disabled = True
+            clear_btn.disabled = True
+    else:
+        events_json.value = ""
+        status.object = "**Status:** file load failed"
+        replay_btn.disabled = True
+        clear_btn.disabled = True
+
+
+file_input.param.watch(_load_rrweb_json, "value")
+
+
+controls = pn.Row(start_btn, stop_btn, replay_btn, clear_btn, file_input, sizing_mode="stretch_width")
 
 pn.template.FastListTemplate(
     title="Panel + Bokeh + rrweb (minimal demo)",
     main=[
         controls,
         status,
-        replay_container,
         plot,
         events_json,
     ],

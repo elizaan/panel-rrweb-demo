@@ -1,1 +1,2 @@
 panel>=1.4.0
+watchfiles>=0.21.0
