@@ -90,11 +90,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Load Panel + rrweb + rrweb-player from CDN
+# Load Panel + rrweb + rrweb-player + html2canvas from CDN
 pn.extension(
   js_files={
     "rrweb": "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js",
     "rrwebPlayer": "https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js",
+    "html2canvas": "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
   },
   css_files=[
     "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/style.css",
@@ -511,7 +512,7 @@ replay_btn.js_on_click(
         
         const header = document.createElement('div');
         header.style.cssText = 'padding: 10px; background: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; align-items: center;';
-        header.innerHTML = '<strong>rrweb Replay</strong><button id="close-replay" style="background:#dc3545; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Close</button>';
+        header.innerHTML = '<strong>rrweb Replay</strong><div><button id="start-recording" style="background:#4caf50; color:white; border:none; padding:5px 15px; border-radius:4px; cursor:pointer; margin-right:5px; font-weight:500;">🔴 Start Recording</button><button id="download-video" style="background:#ff9800; color:white; border:none; padding:5px 15px; border-radius:4px; cursor:pointer; margin-right:10px; font-weight:500; display:none;">📹 Download Video</button><button id="close-replay" style="background:#dc3545; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer;">Close</button></div>';
         
         root = document.createElement('div');
         root.id = 'rrweb-replay-root';
@@ -526,9 +527,202 @@ replay_btn.js_on_click(
           status.object = "**Status:** replay closed";
         };
         
+        // Handle video recording buttons
+        const setupVideoButtons = () => {
+          const startRecordingBtn = document.getElementById('start-recording');
+          const downloadBtn = document.getElementById('download-video');
+          
+          if (startRecordingBtn) {
+            startRecordingBtn.onclick = () => {
+              startRecordingBtn.disabled = true;
+              startRecordingBtn.textContent = '🔴 Recording...';
+              startRecordingBtn.style.background = '#999';
+              
+              // Restart replay from beginning
+              const replayer = window.__rrweb_player ? window.__rrweb_player.getReplayer() : null;
+              if (replayer) {
+                try {
+                  replayer.pause();
+                  replayer.setCurrentTime(0);
+                  replayer.play();
+                } catch (e) {
+                  console.warn('[rrweb-demo] Could not restart replay:', e);
+                }
+              }
+              
+              // Start recording with callback to show download button when done
+              startVideoRecording(() => {
+                startRecordingBtn.style.display = 'none';
+                downloadBtn.style.display = 'inline-block';
+              });
+            };
+          }
+          
+          if (downloadBtn) {
+            downloadBtn.onclick = () => {
+              // Check if video is ready
+              if (!window.__rrweb_video_state || !window.__rrweb_video_state.recordedBlob) {
+                alert('Video not ready yet! Please wait for recording to finish.');
+                return;
+              }
+              
+              // Download the already-recorded video
+              const blob = window.__rrweb_video_state.recordedBlob;
+              const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'rrweb-replay-' + Date.now() + '.webm';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+              
+              status.object = '**Status:** ✅ video downloaded! (' + sizeMB + 'MB)';
+              console.log('[rrweb-demo] Video file downloaded');
+            };
+          }
+        };
+        
+        setupVideoButtons();
+        
         console.log("[rrweb-demo] Created overlay replay container");
       } else {
         console.log("[rrweb-demo] Reusing existing replay root");
+      }
+      
+      // Function to start video recording (called manually by button)
+      function startVideoRecording(onComplete) {
+        console.log('[rrweb-demo] Starting video recording...');
+        
+        // Check if html2canvas is loaded
+        if (typeof html2canvas !== 'function') {
+          console.warn('[rrweb-demo] html2canvas not available, video recording disabled');
+          return;
+        }
+        
+        const replayer = window.__rrweb_player ? window.__rrweb_player.getReplayer() : null;
+        if (!replayer) {
+          console.warn('[rrweb-demo] Replayer not found');
+          return;
+        }
+        
+        // Find the iframe that contains the actual replay
+        const iframe = root.querySelector('iframe');
+        if (!iframe) {
+          console.warn('[rrweb-demo] Replay iframe not found');
+          return;
+        }
+        
+        // Get iframe document and body
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+        const iframeBody = iframeDoc.body;
+        
+        // Create canvas for rendering
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Set canvas size to match iframe content
+        const width = iframe.clientWidth || 1000;
+        const height = iframe.clientHeight || 600;
+        canvas.width = width;
+        canvas.height = height;
+        
+        console.log('[rrweb-demo] Recording canvas created:', width, 'x', height);
+        
+        // Get canvas stream for recording
+        const stream = canvas.captureStream(30); // 30 fps
+        
+        const options = {
+          mimeType: 'video/webm; codecs=vp9',
+          videoBitsPerSecond: 2500000
+        };
+        
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options.mimeType = 'video/webm; codecs=vp8';
+        }
+        
+        const recorder = new MediaRecorder(stream, options);
+        window.__rrweb_video_state.chunks = [];
+        
+        // Get replay duration
+        const metadata = replayer.getMetaData();
+        const durationMs = metadata.totalTime || 30000;
+        const durationSec = Math.ceil(durationMs / 1000);
+        
+        console.log('[rrweb-demo] Recording for', durationSec, 'seconds');
+        
+        // Capture frames from replay
+        let frameCount = 0;
+        let isCapturing = true;
+        
+        const captureFrame = async () => {
+          if (!isCapturing) return;
+          
+          try {
+            const tempCanvas = await html2canvas(iframeBody, {
+              backgroundColor: '#ffffff',
+              logging: false,
+              width: width,
+              height: height,
+              windowWidth: width,
+              windowHeight: height,
+              scale: 1,
+              useCORS: true,
+              allowTaint: true,
+              foreignObjectRendering: true
+            });
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+            
+            frameCount++;
+            if (frameCount % 30 === 0) {
+              console.log('[rrweb-demo] Recorded', frameCount, 'frames');
+            }
+          } catch (e) {
+            console.warn('[rrweb-demo] Frame capture error:', e);
+          }
+          
+          if (isCapturing) {
+            setTimeout(captureFrame, 33);
+          }
+        };
+        
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            window.__rrweb_video_state.chunks.push(e.data);
+          }
+        };
+        
+        recorder.onstop = () => {
+          isCapturing = false;
+          stream.getTracks().forEach(track => track.stop());
+          
+          const blob = new Blob(window.__rrweb_video_state.chunks, { type: 'video/webm' });
+          window.__rrweb_video_state.recordedBlob = blob;
+          window.__rrweb_video_state.isRecording = false;
+          
+          const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+          console.log('[rrweb-demo] Video recording complete:', sizeMB, 'MB,', frameCount, 'frames');
+          status.object = '**Status:** ✅ video ready to download! (' + sizeMB + 'MB)';
+          
+          // Call completion callback to update UI
+          if (onComplete) onComplete();
+        };
+        
+        // Start recording
+        recorder.start();
+        captureFrame();
+        window.__rrweb_video_state.isRecording = true;
+        status.object = '**Status:** 🔴 recording replay in background...';
+        
+        // Auto-stop after replay duration
+        setTimeout(() => {
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        }, durationMs + 1000);
       }
 
       root.innerHTML = "";
@@ -556,12 +750,19 @@ replay_btn.js_on_click(
       const canvasEvents = events.filter(e => e.type === 5 && e.data && e.data.tag === 'canvas-snapshot');
       console.log(`[rrweb-demo] Found ${canvasEvents.length} canvas snapshot events`);
       
+      // Initialize video recording state
+      window.__rrweb_video_state = {
+        isRecording: false,
+        recordedBlob: null,
+        chunks: []
+      };
+      
       try {
         window.__rrweb_player = new rrwebPlayer({
           target: root,
           props: {
             events,
-            autoPlay: true,
+            autoPlay: true,  // Auto-play replay immediately
             showController: true,
             width: root.clientWidth || 1000,
             height: root.clientHeight || 600,
@@ -634,7 +835,6 @@ replay_btn.js_on_click(
 )
 
 
-
 clear_btn.js_on_click(
     args={"events_json": events_json, "replay_btn": replay_btn, "clear_btn": clear_btn, "status": status},
     code="""
@@ -653,6 +853,12 @@ clear_btn.js_on_click(
     if (window.__rrweb_state) {
       window.__rrweb_state.events = [];
       window.__rrweb_state.stopFn = null;
+    }
+    
+    // Close replay overlay if open
+    const overlay = document.getElementById('rrweb-overlay');
+    if (overlay) {
+      document.body.removeChild(overlay);
     }
 
     status.object = "**Status:** cleared";
